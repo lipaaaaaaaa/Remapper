@@ -551,6 +551,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     AdjustWindowRect(&r, st, FALSE);
     HWND h = CreateWindowW(L"Remap95", L"Key Remapper", st, CW_USEDEFAULT, CW_USEDEFAULT,
                            r.right - r.left, r.bottom - r.top, nullptr, nullptr, inst, nullptr);
+    // Optional icon: put icon.ico next to remap.ini. Missing file just keeps the default icon.
+    if (HANDLE big = LoadImageW(nullptr, L"icon.ico", IMAGE_ICON, 32, 32, LR_LOADFROMFILE))
+        SendMessageW(h, WM_SETICON, ICON_BIG, (LPARAM)big);
+    if (HANDLE small = LoadImageW(nullptr, L"icon.ico", IMAGE_ICON, 16, 16, LR_LOADFROMFILE))
+        SendMessageW(h, WM_SETICON, ICON_SMALL, (LPARAM)small);
     ShowWindow(h, show);
 
     HHOOK hk = SetWindowsHookExW(WH_KEYBOARD_LL, hook, inst, 0);
