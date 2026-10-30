@@ -181,6 +181,14 @@ static DWORD WINAPI rgbApply(LPVOID p) {
             }
             Sleep(100);
             set(L"set 0x02", b);
+            for (int chunk = 0; chunk < 2; chunk++) {
+                auto rb = cmd(138);
+                rb[2] = profile + 1;
+                rb[3] = 1;
+                rb[4] = (BYTE)(chunk + 1);
+                set(L"set 0x8A", rb, 40);
+                get(L"get 0x8A", rb);
+            }
         }
         return true;
     });
