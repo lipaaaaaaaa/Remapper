@@ -1,17 +1,3 @@
-// Key remapper with classic Win95 style window, HID info button and RGB control for Dark Project ALU87A (342D:E40F).
-// Build (MinGW): windres remap.rc -O coff -o remap_res.o && g++ -std=c++17 -O2 -municode -mwindows -static remap.cpp remap_res.o -o remap.exe -lgdi32 -lhid -lsetupapi -lcomdlg32
-// Build (MSVC):  rc remap.rc && cl /EHsc /O2 remap.cpp remap.res user32.lib gdi32.lib hid.lib setupapi.lib comdlg32.lib /link /SUBSYSTEM:WINDOWS
-// remap.rc and icon.ico are only needed when building, the icon ends up inside remap.exe.
-// Do not add a manifest, that is what keeps the classic look.
-// Rules are hex virtual key codes, saved to remap.ini as from=to.
-// remap.ini and settings.ini are stored in %LOCALAPPDATA%\Remapper (created on first run).
-//
-// RGB:
-//   Nothing painted: global effect. Multicolor fills the 8-slot palette (whole keyboard).
-//   Any key or row painted: Custom mode (HID effect 14, slot byte 52 = 1) plus per-LED
-//   colors on feature command 0x0A. Unpainted keys are sent black, so one row stays one row.
-//   The 8-slot palette cannot target a row; that is why the whole board lit up before.
-// LED indexes are the ALU87A Matrix_LEDCode (column-major, 6 keys per column).
 #include <windows.h>
 #include <commdlg.h>
 #include <setupapi.h>
@@ -28,7 +14,7 @@ extern "C" {
 #include <string>
 #include <vector>
 
-enum { ID_LIST = 1, ID_FROM, ID_TO, ID_ADD, ID_DEL, ID_SAVE, ID_HID, ID_FX, ID_MULTI, ID_COLOR, ID_BRIGHT, ID_SPEED, ID_RGB, ID_PICK };
+enum { ID_LIST = 1, ID_FROM, ID_TO, ID_ADD, ID_DEL, ID_SAVE, ID_FX, ID_MULTI, ID_COLOR, ID_BRIGHT, ID_SPEED, ID_RGB, ID_PICK };
 
 static std::map<DWORD, WORD> g_map;
 static HWND g_list, g_from, g_to, g_fx, g_multi, g_color;
@@ -44,7 +30,6 @@ struct Fx {
     BYTE id;
     DWORD rgb, bright, speed;
     bool multi;
-    bool perkey;
     int painted;
     BYTE kr[96], kg[96], kb[96];
     COLORREF pal[6];
@@ -69,9 +54,8 @@ static LRESULT CALLBACK hook(int n, WPARAM w, LPARAM l) {
     return CallNextHookEx(nullptr, n, w, l);
 }
 
-// Lists HID interfaces of VID 342D / PID E40F with usage page, usage and report sizes.
-static std::wstring hidInfo() {
-    std::wstring out;
+template <class F>
+static void eachHid(DWORD access, F f) {
     GUID g;
     HidD_GetHidGuid(&g);
     HDEVINFO set = SetupDiGetClassDevsW(&g, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
@@ -84,210 +68,124 @@ static std::wstring hidInfo() {
         auto* det = reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(buf.data());
         det->cbSize = sizeof *det;
         if (!SetupDiGetDeviceInterfaceDetailW(set, &d, det, sz, nullptr, nullptr)) continue;
-        HANDLE h = CreateFileW(det->DevicePath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+        HANDLE h = CreateFileW(det->DevicePath, access, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                                OPEN_EXISTING, 0, nullptr);
         if (h == INVALID_HANDLE_VALUE) continue;
         HIDD_ATTRIBUTES a{};
         a.Size = sizeof a;
         PHIDP_PREPARSED_DATA pp;
+        bool stop = false;
         if (HidD_GetAttributes(h, &a) && a.VendorID == 0x342D && a.ProductID == 0xE40F &&
             HidD_GetPreparsedData(h, &pp)) {
             HIDP_CAPS c;
             HidP_GetCaps(pp, &c);
-            wchar_t s[512];
-            swprintf(s, 512, L"%ls\nUsagePage=%04X Usage=%04X In=%u Out=%u Feature=%u\n\n",
-                     det->DevicePath, c.UsagePage, c.Usage, c.InputReportByteLength,
-                     c.OutputReportByteLength, c.FeatureReportByteLength);
-            out += s;
             HidD_FreePreparsedData(pp);
+            stop = f(h, det->DevicePath, c);
         }
         CloseHandle(h);
+        if (stop) break;
     }
     SetupDiDestroyDeviceInfoList(set);
-    return out.empty() ? L"No matching HID interfaces found." : out;
 }
 
-static std::wstring dump(const BYTE* p, int n) {
-    std::wstring s;
-    wchar_t t[8];
-    for (int i = 0; i < n; i++) {
-        if (i % 16 == 0) { swprintf(t, 8, L"\n%02X:", i); s += t; }
-        swprintf(t, 8, L" %02X", p[i]);
-        s += t;
-    }
-    return s + L"\n";
-}
-
-// Sends the effect to the keyboard and shows a log box (Ctrl+C in the box copies the text).
 static DWORD WINAPI rgbApply(LPVOID p) {
     Fx f = *static_cast<Fx*>(p);
     delete static_cast<Fx*>(p);
     std::wstring log;
     bool found = false;
-    auto step = [&](const wchar_t* what, BOOL ok) {
-        DWORD err = GetLastError();
-        wchar_t t[96];
-        swprintf(t, 96, L"%ls: %ls", what, ok ? L"ok" : L"FAILED");
-        log += t;
-        if (!ok) { swprintf(t, 96, L" (error %lu)", err); log += t; }
-        log += L"\n";
-    };
-    GUID g;
-    HidD_GetHidGuid(&g);
-    HDEVINFO set = SetupDiGetClassDevsW(&g, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
-    SP_DEVICE_INTERFACE_DATA d{};
-    d.cbSize = sizeof d;
-    for (DWORD i = 0; SetupDiEnumDeviceInterfaces(set, nullptr, &g, i, &d); i++) {
-        DWORD sz = 0;
-        SetupDiGetDeviceInterfaceDetailW(set, &d, nullptr, 0, &sz, nullptr);
-        std::vector<char> buf(sz);
-        auto* det = reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(buf.data());
-        det->cbSize = sizeof *det;
-        if (!SetupDiGetDeviceInterfaceDetailW(set, &d, det, sz, nullptr, nullptr)) continue;
-        HANDLE h = CreateFileW(det->DevicePath, GENERIC_READ | GENERIC_WRITE,
-                               FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
-        if (h == INVALID_HANDLE_VALUE) {
-            if (wcsstr(det->DevicePath, L"pid_e40f") && wcsstr(det->DevicePath, L"mi_02")) {
-                wchar_t t[64];
-                swprintf(t, 64, L"Open mi_02 failed (error %lu)\n", GetLastError());
-                log += t;
+    eachHid(GENERIC_READ | GENERIC_WRITE, [&](HANDLE h, const wchar_t*, const HIDP_CAPS& c) {
+        if (c.UsagePage != 0xFF01 || c.Usage != 1) return false;
+        found = true;
+        auto fail = [&](const wchar_t* what, BOOL ok) {
+            if (ok) return;
+            wchar_t t[96];
+            swprintf(t, 96, L"%ls failed (error %lu)\n", what, GetLastError());
+            log += t;
+        };
+        auto cmd = [&](BYTE id) {
+            std::vector<BYTE> v(c.FeatureReportByteLength);
+            v[0] = 7;
+            v[1] = id;
+            return v;
+        };
+        auto set = [&](const wchar_t* what, std::vector<BYTE>& v, DWORD ms = 100) {
+            BOOL ok = HidD_SetFeature(h, v.data(), (ULONG)v.size());
+            fail(what, ok);
+            Sleep(ms);
+            return ok;
+        };
+        auto get = [&](const wchar_t* what, std::vector<BYTE>& v) {
+            fail(what, HidD_GetFeature(h, v.data(), (ULONG)v.size()));
+        };
+
+        auto b = cmd(129);
+        set(L"set 0x81", b);
+        get(L"get 0x81", b);
+        BYTE profile = b[3];
+        b = cmd(130);
+        b[2] = profile + 1;
+        set(L"set 0x82", b);
+        get(L"get 0x82", b);
+        b[1] = 2;
+        memmove(&b[2], &b[3], b.size() - 3);
+        b.back() = 0;
+        BYTE* u = b.data() + 1;
+
+        auto q = cmd(139);
+        set(L"set 0x8B", q);
+        get(L"get 0x8B", q);
+        BYTE debounce = std::max<BYTE>(q[4], 5);
+        auto z = cmd(11);
+        z[2] = q[3];
+        z[3] = debounce;
+        set(L"set 0x0B", z);
+
+        bool perkey = f.painted > 0;
+        BYTE id = perkey ? 14 : f.id;
+        u[8] = id;
+        u[9 + id] = (4 * f.bright + 99) / 100;
+        u[23 + id] = (550 - 4 * f.speed) / 100;
+        u[37 + id] = (!perkey && f.multi) ? 8 : 0;
+        u[52] = perkey ? 1 : 0;
+        u[85] = debounce;
+        u[82] = id == 3 ? 0 : 8;
+        if (!perkey && f.multi && f.n > 0) {
+            for (int s = 0; s < 8; s++) {
+                COLORREF col = f.pal[s % f.n];
+                u[58 + s] = GetRValue(col);
+                u[66 + s] = GetGValue(col);
+                u[74 + s] = GetBValue(col);
             }
-            continue;
+        } else if (!perkey) {
+            u[58] = f.rgb >> 16;
+            u[66] = f.rgb >> 8;
+            u[74] = f.rgb;
         }
-        HIDD_ATTRIBUTES a{};
-        a.Size = sizeof a;
-        PHIDP_PREPARSED_DATA pp;
-        if (HidD_GetAttributes(h, &a) && a.VendorID == 0x342D && a.ProductID == 0xE40F &&
-            HidD_GetPreparsedData(h, &pp)) {
-            HIDP_CAPS c;
-            HidP_GetCaps(pp, &c);
-            HidD_FreePreparsedData(pp);
-            if (c.UsagePage == 0xFF01 && c.Usage == 1) {
-                found = true;
-                std::vector<BYTE> b(c.FeatureReportByteLength);
-                b[0] = 7;
-                b[1] = 129;
-                step(L"Set 0x81", HidD_SetFeature(h, b.data(), (ULONG)b.size()));
-                Sleep(100);
-                step(L"Get 0x81", HidD_GetFeature(h, b.data(), (ULONG)b.size()));
-                BYTE profile = b[3];
-                wchar_t t[80];
-                swprintf(t, 80, L"Profile byte b[3] = %u\n", profile);
-                log += t;
-                std::fill(b.begin(), b.end(), 0);
-                b[0] = 7;
-                b[1] = 130;
-                b[2] = profile + 1;
-                step(L"Set 0x82", HidD_SetFeature(h, b.data(), (ULONG)b.size()));
-                Sleep(100);
-                step(L"Get 0x82", HidD_GetFeature(h, b.data(), (ULONG)b.size()));
-                log += L"Read back:" + dump(b.data(), 96);
-                b[1] = 2;
-                memmove(&b[2], &b[3], b.size() - 3);
-                b.back() = 0;
-                BYTE* u = b.data() + 1;
-                std::vector<BYTE> q(c.FeatureReportByteLength);
-                q[0] = 7;
-                q[1] = 139;
-                step(L"Set 0x8B", HidD_SetFeature(h, q.data(), (ULONG)q.size()));
-                Sleep(100);
-                step(L"Get 0x8B", HidD_GetFeature(h, q.data(), (ULONG)q.size()));
-                swprintf(t, 80, L"Debounce = %u\n", q[4]);
-                log += t;
-                std::vector<BYTE> z(c.FeatureReportByteLength);
-                z[0] = 7;
-                z[1] = 11;
-                z[2] = q[3];
-                z[3] = std::max<BYTE>(q[4], 5);
-                step(L"Set 0x0B", HidD_SetFeature(h, z.data(), (ULONG)z.size()));
-                Sleep(100);
-                BYTE id = f.perkey ? 14 : f.id;
-                u[8] = id;
-                u[9 + id] = (4 * f.bright + 99) / 100;
-                u[23 + id] = (550 - 4 * f.speed) / 100;
-                // 8 here is the web app's multicolor flag. It must stay 0 for Custom
-                // or the firmware ignores the per-LED map.
-                u[37 + id] = (!f.perkey && f.multi) ? 8 : 0;
-                u[52] = f.perkey ? 1 : 0;
-                u[85] = std::max<BYTE>(q[4], 5);
-                u[82] = id == 3 ? 0 : 8;
-                if (!f.perkey && f.multi && f.n > 0) {
-                    for (int s = 0; s < 8; s++) {
-                        COLORREF col = f.pal[s % f.n];
-                        u[58 + s] = GetRValue(col);
-                        u[66 + s] = GetGValue(col);
-                        u[74 + s] = GetBValue(col);
-                    }
-                } else if (!f.perkey) {
-                    u[58] = f.rgb >> 16;
-                    u[66] = f.rgb >> 8;
-                    u[74] = f.rgb;
-                }
-                if (f.perkey) {
-                    swprintf(t, 80, L"Per-key custom, %d keys, effect 14 slot 1\n", f.painted);
-                    log += t;
-                }
-                log += L"Writing:" + dump(b.data(), 96);
-                BOOL wrote = HidD_SetFeature(h, b.data(), (ULONG)b.size());
-                step(L"Set 0x02", wrote);
-                Sleep(100);
-                if (wrote && f.perkey && b.size() >= 200) {
-                    for (int chunk = 0; chunk < 2; chunk++) {
-                        std::vector<BYTE> w(b.size(), 0);
-                        w[0] = 7;
-                        w[1] = 10;
-                        w[2] = profile + 1;
-                        w[3] = 1;
-                        w[4] = (BYTE)(chunk + 1);
-                        for (int i = 0; i < 96; i++) {
-                            if (chunk == 0) {
-                                w[8 + i] = f.kr[i];
-                                w[8 + 96 + i] = f.kg[i];
-                            } else {
-                                w[8 + i] = f.kb[i];
-                            }
-                        }
-                        wchar_t what[40];
-                        swprintf(what, 40, L"Set 0x0A chunk %d", chunk + 1);
-                        step(what, HidD_SetFeature(h, w.data(), (ULONG)w.size()));
-                        Sleep(40);
-                    }
-                    Sleep(100);
-                    // The LED map is written after the effect report, so send the effect again
-                    // to make the keyboard apply the map that was just written.
-                    step(L"Set 0x02 again", HidD_SetFeature(h, b.data(), (ULONG)b.size()));
-                    Sleep(100);
-                    std::vector<BYTE> rb[2];
-                    for (int chunk = 0; chunk < 2; chunk++) {
-                        rb[chunk].assign(b.size(), 0);
-                        rb[chunk][0] = 7;
-                        rb[chunk][1] = 138;
-                        rb[chunk][2] = profile + 1;
-                        rb[chunk][3] = 1;
-                        rb[chunk][4] = (BYTE)(chunk + 1);
-                        HidD_SetFeature(h, rb[chunk].data(), (ULONG)rb[chunk].size());
-                        Sleep(40);
-                        HidD_GetFeature(h, rb[chunk].data(), (ULONG)rb[chunk].size());
-                    }
-                    int first = 0, last = 95;
-                    while (first < 96 && !(f.kr[first] | f.kg[first] | f.kb[first])) first++;
-                    while (last >= 0 && !(f.kr[last] | f.kg[last] | f.kb[last])) last--;
-                    for (int k : {first, last}) {
-                        swprintf(t, 80, L"LED %d sent %02X%02X%02X read8 %02X%02X%02X read9 %02X%02X%02X\n", k,
-                                 f.kr[k], f.kg[k], f.kb[k], rb[0][8 + k], rb[0][104 + k], rb[1][8 + k],
-                                 rb[0][9 + k], rb[0][105 + k], rb[1][9 + k]);
-                        log += t;
+        BOOL wrote = set(L"set 0x02", b);
+
+        if (wrote && perkey && b.size() >= 200) {
+            for (int chunk = 0; chunk < 2; chunk++) {
+                auto w = cmd(10);
+                w[2] = profile + 1;
+                w[3] = 1;
+                w[4] = (BYTE)(chunk + 1);
+                for (int i = 0; i < 96; i++) {
+                    if (chunk == 0) {
+                        w[8 + i] = f.kr[i];
+                        w[8 + 96 + i] = f.kg[i];
+                    } else {
+                        w[8 + i] = f.kb[i];
                     }
                 }
-                CloseHandle(h);
-                break;
+                set(L"set 0x0A", w, 40);
             }
+            Sleep(100);
+            set(L"set 0x02", b);
         }
-        CloseHandle(h);
-    }
-    SetupDiDestroyDeviceInfoList(set);
+        return true;
+    });
     if (!found) log += L"No FF01 interface of 342D:E40F could be opened.\n";
-    MessageBoxW(nullptr, log.c_str(), L"Apply RGB", MB_OK);
+    MessageBoxW(nullptr, log.empty() ? L"Applied." : log.c_str(), L"Apply RGB", MB_OK);
     return 0;
 }
 
@@ -300,7 +198,6 @@ static const std::vector<std::vector<Key>> g_rows = {
     {{L"Shift",9},{L"Z",4},{L"X",4},{L"C",4},{L"V",4},{L"B",4},{L"N",4},{L"M",4},{L",",4},{L".",4},{L"/",4},{L"Shift",11},{nullptr,7},{L"Up",4}},
     {{L"Ctrl",5},{L"Win",5},{L"Alt",5},{L"Space",25},{L"Alt",5},{L"Win",5},{L"Menu",5},{L"Ctrl",5},{nullptr,3},{L"Left",4},{L"Down",4},{L"Right",4}},
 };
-// Same order as g_rows. Index into the 96-LED custom buffer.
 static const int g_led[6][20] = {
     {0, 6, 12, 18, 24, 30, 36, 42, 48, 54, 60, 66, 72, -1, 84, 90, -1, -1, -1, -1},
     {1, 7, 13, 19, 25, 31, 37, 43, 49, 55, 61, 67, 73, 79, -1, 85, 91, -1, -1, -1},
@@ -310,10 +207,10 @@ static const int g_led[6][20] = {
     {11, 17, 23, 29, 65, 71, 77, 83, -1, 89, 95, -1, -1, -1, -1, -1, -1, -1, -1, -1},
 };
 static const int Q = 7, KH = 28, KX = 310, KY = 34;
-static COLORREF g_kc[6][20];   // preview color of every key
-static COLORREF g_row[6];      // palette color of every row tab
-static bool g_rowSet[6];       // true once the row tab was painted
-static const COLORREF OFF = RGB(64, 64, 64);  // unpainted key look (dark gray)
+static COLORREF g_kc[6][20];
+static COLORREF g_row[6];
+static bool g_rowSet[6];
+static const COLORREF OFF = RGB(64, 64, 64);
 
 static RECT rowBox(int r) { return RECT{KX - 18, KY + r * KH, KX - 4, KY + r * KH + KH}; }
 
@@ -322,11 +219,17 @@ template <class F> static void each(F f) {
         int x = KX;
         for (int c = 0; c < (int)g_rows[r].size(); c++) {
             int w = g_rows[r][c].w * Q;
-            if (!g_rows[r][c].n) { x += w; continue; }
-            f(r, c, RECT{x, KY + r * KH, x + w, KY + r * KH + KH});
+            if (g_rows[r][c].n) f(r, c, RECT{x, KY + r * KH, x + w, KY + r * KH + KH});
             x += w;
         }
     }
+}
+
+static void box(HDC dc, RECT r, COLORREF c) {
+    HBRUSH b = CreateSolidBrush(c);
+    FillRect(dc, &r, b);
+    DeleteObject(b);
+    DrawEdge(dc, &r, EDGE_RAISED, BF_RECT);
 }
 
 static void refresh() {
@@ -343,6 +246,17 @@ static DWORD hex(HWND h) {
     wchar_t s[16];
     GetWindowTextW(h, s, 16);
     return wcstoul(s, nullptr, 16);
+}
+
+static COLORREF color() {
+    DWORD v = hex(g_color);
+    return RGB(v >> 16, v >> 8, v);
+}
+
+static void setColor(DWORD rgb) {
+    wchar_t s[8];
+    swprintf(s, 8, L"%06lX", rgb);
+    SetWindowTextW(g_color, s);
 }
 
 static HWND mk(HWND p, const wchar_t* cls, const wchar_t* txt, DWORD st, int x, int y, int w, int h, int id) {
@@ -362,6 +276,23 @@ static void saveSettings(HWND h) {
     f << "color=" << std::hex << hex(g_color) << std::dec << '\n';
 }
 
+static void loadSettings(HWND h) {
+    std::ifstream f("settings.ini");
+    std::string ln;
+    while (std::getline(f, ln)) {
+        auto eq = ln.find('=');
+        if (eq == std::string::npos) continue;
+        std::string k = ln.substr(0, eq);
+        bool dec = k == "effect" || k == "multi" || k == "bright" || k == "speed";
+        DWORD v = std::stoul(ln.substr(eq + 1), nullptr, dec ? 10 : 16);
+        if (k == "effect") SendMessageW(g_fx, CB_SETCURSEL, v, 0);
+        else if (k == "multi") SendMessageW(g_multi, BM_SETCHECK, v ? BST_CHECKED : BST_UNCHECKED, 0);
+        else if (k == "bright") SetDlgItemInt(h, ID_BRIGHT, v, FALSE);
+        else if (k == "speed") SetDlgItemInt(h, ID_SPEED, v, FALSE);
+        else if (k == "color") setColor(v);
+    }
+}
+
 static LRESULT CALLBACK wnd(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
     case WM_CREATE:
@@ -373,7 +304,6 @@ static LRESULT CALLBACK wnd(HWND h, UINT m, WPARAM w, LPARAM l) {
         mk(h, L"BUTTON", L"Add", WS_TABSTOP | BS_PUSHBUTTON, 10, 218, 80, 24, ID_ADD);
         mk(h, L"BUTTON", L"Remove", WS_TABSTOP | BS_PUSHBUTTON, 100, 218, 80, 24, ID_DEL);
         mk(h, L"BUTTON", L"Save", WS_TABSTOP | BS_PUSHBUTTON, 190, 218, 80, 24, ID_SAVE);
-        mk(h, L"BUTTON", L"HID Info", WS_TABSTOP | BS_PUSHBUTTON, 10, 250, 80, 24, ID_HID);
         mk(h, L"STATIC", L"Effect:", 0, 10, 284, 90, 14, 0);
         g_fx = mk(h, L"COMBOBOX", L"", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, 10, 300, 180, 200, ID_FX);
         g_multi = mk(h, L"BUTTON", L"Multicolor", WS_TABSTOP | BS_AUTOCHECKBOX, 200, 300, 80, 22, ID_MULTI);
@@ -384,31 +314,12 @@ static LRESULT CALLBACK wnd(HWND h, UINT m, WPARAM w, LPARAM l) {
         mk(h, L"EDIT", L"100", WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER, 100, 348, 80, 22, ID_BRIGHT);
         mk(h, L"EDIT", L"50", WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER, 190, 348, 80, 22, ID_SPEED);
         mk(h, L"BUTTON", L"Apply RGB", WS_TABSTOP | BS_PUSHBUTTON, 10, 380, 80, 24, ID_RGB);
+        mk(h, L"BUTTON", L"Pick...", WS_TABSTOP | BS_PUSHBUTTON, 100, 380, 80, 24, ID_PICK);
+        mk(h, L"STATIC", L"Row tab or key: that key only. Right click clears. Empty board = effect/palette.", 0, KX, 10, 430, 14, 0);
         for (auto& e : g_effects) SendMessageW(g_fx, CB_ADDSTRING, 0, (LPARAM)e.name);
         SendMessageW(g_fx, CB_SETCURSEL, 0, 0);
         std::fill(&g_kc[0][0], &g_kc[0][0] + sizeof g_kc / sizeof(COLORREF), OFF);
-        mk(h, L"STATIC", L"Row tab or key: that key only. Right click clears. Empty board = effect/palette.", 0, KX, 10, 430, 14, 0);
-        mk(h, L"BUTTON", L"Pick...", WS_TABSTOP | BS_PUSHBUTTON, 100, 380, 80, 24, ID_PICK);
-        {
-            std::ifstream sf("settings.ini");
-            std::string ln;
-            while (std::getline(sf, ln)) {
-                auto eq = ln.find('=');
-                if (eq == std::string::npos) continue;
-                std::string k = ln.substr(0, eq);
-                bool dec = k == "effect" || k == "multi" || k == "bright" || k == "speed";
-                DWORD v = std::stoul(ln.substr(eq + 1), nullptr, dec ? 10 : 16);
-                if (k == "effect") SendMessageW(g_fx, CB_SETCURSEL, v, 0);
-                else if (k == "multi") SendMessageW(g_multi, BM_SETCHECK, v ? BST_CHECKED : BST_UNCHECKED, 0);
-                else if (k == "bright") SetDlgItemInt(h, ID_BRIGHT, v, FALSE);
-                else if (k == "speed") SetDlgItemInt(h, ID_SPEED, v, FALSE);
-                else if (k == "color") {
-                    wchar_t s[8];
-                    swprintf(s, 8, L"%06lX", v);
-                    SetWindowTextW(g_color, s);
-                }
-            }
-        }
+        loadSettings(h);
         refresh();
         return 0;
     case WM_PAINT: {
@@ -419,20 +330,11 @@ static LRESULT CALLBACK wnd(HWND h, UINT m, WPARAM w, LPARAM l) {
         each([&](int r, int c, RECT k) {
             COLORREF v = g_kc[r][c];
             if (v != OFF) v = RGB(GetRValue(v) * 6 / 10, GetGValue(v) * 6 / 10, GetBValue(v) * 6 / 10);
-            HBRUSH b = CreateSolidBrush(v);
-            FillRect(dc, &k, b);
-            DeleteObject(b);
-            DrawEdge(dc, &k, EDGE_RAISED, BF_RECT);
+            box(dc, k, v);
             SetTextColor(dc, (GetRValue(v) * 299 + GetGValue(v) * 587 + GetBValue(v) * 114) / 1000 > 128 ? 0 : 0xFFFFFF);
             DrawTextW(dc, g_rows[r][c].n, -1, &k, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         });
-        for (int r = 0; r < 6; r++) {
-            RECT s = rowBox(r);
-            HBRUSH b = CreateSolidBrush(g_rowSet[r] ? g_row[r] : OFF);
-            FillRect(dc, &s, b);
-            DeleteObject(b);
-            DrawEdge(dc, &s, EDGE_RAISED, BF_RECT);
-        }
+        for (int r = 0; r < 6; r++) box(dc, rowBox(r), g_rowSet[r] ? g_row[r] : OFF);
         EndPaint(h, &ps);
         return 0;
     }
@@ -440,17 +342,15 @@ static LRESULT CALLBACK wnd(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_RBUTTONDOWN: {
         POINT p{(short)LOWORD(l), (short)HIWORD(l)};
         bool clear = m == WM_RBUTTONDOWN;
-        DWORD v = hex(g_color);
-        COLORREF col = RGB(v >> 16, v >> 8, v);
-        COLORREF off = OFF;
+        COLORREF col = color();
         each([&](int r, int c, RECT k) {
-            if (PtInRect(&k, p)) g_kc[r][c] = (clear || g_kc[r][c] == col) ? off : col;
+            if (PtInRect(&k, p)) g_kc[r][c] = (clear || g_kc[r][c] == col) ? OFF : col;
         });
         for (int r = 0; r < 6; r++) {
             RECT s = rowBox(r);
             if (PtInRect(&s, p)) {
                 bool unpaint = clear || (g_rowSet[r] && g_row[r] == col);
-                std::fill(g_kc[r], g_kc[r] + g_rows[r].size(), unpaint ? off : col);
+                std::fill(g_kc[r], g_kc[r] + g_rows[r].size(), unpaint ? OFF : col);
                 g_row[r] = col;
                 g_rowSet[r] = !unpaint;
             }
@@ -479,21 +379,14 @@ static LRESULT CALLBACK wnd(HWND h, UINT m, WPARAM w, LPARAM l) {
             for (auto& [a, b] : g_map) f << std::hex << a << '=' << b << '\n';
             break;
         }
-        case ID_HID:
-            MessageBoxW(h, hidInfo().c_str(), L"HID Info", MB_OK);
-            break;
         case ID_PICK: {
             static COLORREF cust[16];
-            DWORD v = hex(g_color);
             CHOOSECOLORW cc{sizeof cc, h};
-            cc.rgbResult = RGB(v >> 16, v >> 8, v);
+            cc.rgbResult = color();
             cc.lpCustColors = cust;
             cc.Flags = CC_RGBINIT | CC_FULLOPEN;
-            if (ChooseColorW(&cc)) {
-                wchar_t s[8];
-                swprintf(s, 8, L"%02X%02X%02X", GetRValue(cc.rgbResult), GetGValue(cc.rgbResult), GetBValue(cc.rgbResult));
-                SetWindowTextW(g_color, s);
-            }
+            if (ChooseColorW(&cc))
+                setColor(GetRValue(cc.rgbResult) << 16 | GetGValue(cc.rgbResult) << 8 | GetBValue(cc.rgbResult));
             break;
         }
         case ID_RGB: {
@@ -506,18 +399,16 @@ static LRESULT CALLBACK wnd(HWND h, UINT m, WPARAM w, LPARAM l) {
             f->multi = SendMessageW(g_multi, BM_GETCHECK, 0, 0) == BST_CHECKED;
             for (int r = 0; r < 6; r++)
                 if (g_rowSet[r]) f->pal[f->n++] = g_row[r];
-            COLORREF off = OFF;
             for (int r = 0; r < 6; r++) {
                 for (int c = 0; c < (int)g_rows[r].size(); c++) {
                     int led = g_led[r][c];
-                    if (led < 0 || g_kc[r][c] == off) continue;
+                    if (led < 0 || g_kc[r][c] == OFF) continue;
                     f->kr[led] = GetRValue(g_kc[r][c]);
                     f->kg[led] = GetGValue(g_kc[r][c]);
                     f->kb[led] = GetBValue(g_kc[r][c]);
                     f->painted++;
                 }
             }
-            f->perkey = f->painted > 0;
             CloseHandle(CreateThread(nullptr, 0, rgbApply, f, 0, nullptr));
             break;
         }
@@ -532,8 +423,6 @@ static LRESULT CALLBACK wnd(HWND h, UINT m, WPARAM w, LPARAM l) {
 }
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
-    // Configs (remap.ini, settings.ini) live in %LOCALAPPDATA%\Remapper. Switching the working
-    // folder there makes every relative file name below point at it.
     wchar_t base[MAX_PATH];
     DWORD bl = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
     if (bl > 0 && bl < MAX_PATH - 16) {
@@ -565,7 +454,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     AdjustWindowRect(&r, st, FALSE);
     HWND h = CreateWindowW(L"Remap95", L"Key Remapper", st, CW_USEDEFAULT, CW_USEDEFAULT,
                            r.right - r.left, r.bottom - r.top, nullptr, nullptr, inst, nullptr);
-    // The icon comes from the resource compiled into the exe (remap.rc, icon.ico).
     if (HANDLE big = LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR))
         SendMessageW(h, WM_SETICON, ICON_BIG, (LPARAM)big);
     if (HANDLE small = LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR))
