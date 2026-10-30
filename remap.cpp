@@ -293,24 +293,24 @@ static DWORD WINAPI rgbApply(LPVOID p) {
 
 struct Key { const wchar_t* n; int w; };
 static const std::vector<std::vector<Key>> g_rows = {
-    {{L"Esc",4},{L"F1",4},{L"F2",4},{L"F3",4},{L"F4",4},{L"F5",4},{L"F6",4},{L"F7",4},{L"F8",4},{L"F9",4},{L"F10",4},{L"F11",4},{L"F12",4}},
-    {{L"`",4},{L"1",4},{L"2",4},{L"3",4},{L"4",4},{L"5",4},{L"6",4},{L"7",4},{L"8",4},{L"9",4},{L"0",4},{L"-",4},{L"=",4},{L"Bksp",8}},
-    {{L"Tab",6},{L"Q",4},{L"W",4},{L"E",4},{L"R",4},{L"T",4},{L"Y",4},{L"U",4},{L"I",4},{L"O",4},{L"P",4},{L"[",4},{L"]",4},{L"\\",6}},
+    {{L"Esc",4},{L"F1",4},{L"F2",4},{L"F3",4},{L"F4",4},{L"F5",4},{L"F6",4},{L"F7",4},{L"F8",4},{L"F9",4},{L"F10",4},{L"F11",4},{L"F12",4},{nullptr,11},{L"PrtSc",4},{L"ScrLk",4},{L"Pause",4}},
+    {{L"`",4},{L"1",4},{L"2",4},{L"3",4},{L"4",4},{L"5",4},{L"6",4},{L"7",4},{L"8",4},{L"9",4},{L"0",4},{L"-",4},{L"=",4},{L"Bksp",8},{nullptr,3},{L"Ins",4},{L"Home",4},{L"PgUp",4}},
+    {{L"Tab",6},{L"Q",4},{L"W",4},{L"E",4},{L"R",4},{L"T",4},{L"Y",4},{L"U",4},{L"I",4},{L"O",4},{L"P",4},{L"[",4},{L"]",4},{L"\\",6},{nullptr,3},{L"Del",4},{L"End",4},{L"PgDn",4}},
     {{L"Caps",7},{L"A",4},{L"S",4},{L"D",4},{L"F",4},{L"G",4},{L"H",4},{L"J",4},{L"K",4},{L"L",4},{L";",4},{L"'",4},{L"Enter",9}},
-    {{L"Shift",9},{L"Z",4},{L"X",4},{L"C",4},{L"V",4},{L"B",4},{L"N",4},{L"M",4},{L",",4},{L".",4},{L"/",4},{L"Shift",11}},
-    {{L"Ctrl",5},{L"Win",5},{L"Alt",5},{L"Space",25},{L"Alt",5},{L"Win",5},{L"Menu",5},{L"Ctrl",5}},
+    {{L"Shift",9},{L"Z",4},{L"X",4},{L"C",4},{L"V",4},{L"B",4},{L"N",4},{L"M",4},{L",",4},{L".",4},{L"/",4},{L"Shift",11},{nullptr,7},{L"Up",4}},
+    {{L"Ctrl",5},{L"Win",5},{L"Alt",5},{L"Space",25},{L"Alt",5},{L"Win",5},{L"Menu",5},{L"Ctrl",5},{nullptr,3},{L"Left",4},{L"Down",4},{L"Right",4}},
 };
 // Same order as g_rows. Index into the 96-LED custom buffer.
-static const int g_led[6][16] = {
-    {0, 6, 12, 18, 24, 30, 36, 42, 48, 54, 60, 66, 72, -1, -1, -1},
-    {1, 7, 13, 19, 25, 31, 37, 43, 49, 55, 61, 67, 73, 79, -1, -1},
-    {2, 8, 14, 20, 26, 32, 38, 44, 50, 56, 62, 68, 74, 80, -1, -1},
-    {3, 9, 15, 21, 27, 33, 39, 45, 51, 57, 63, 69, 75, -1, -1, -1},
-    {5, 10, 16, 22, 28, 34, 40, 46, 52, 58, 64, 70, -1, -1, -1, -1},
-    {11, 17, 23, 29, 65, 71, 77, 83, -1, -1, -1, -1, -1, -1, -1, -1},
+static const int g_led[6][20] = {
+    {0, 6, 12, 18, 24, 30, 36, 42, 48, 54, 60, 66, 72, -1, 84, 90, -1, -1, -1, -1},
+    {1, 7, 13, 19, 25, 31, 37, 43, 49, 55, 61, 67, 73, 79, -1, 85, 91, -1, -1, -1},
+    {2, 8, 14, 20, 26, 32, 38, 44, 50, 56, 62, 68, 74, 80, -1, 86, 92, -1, -1, -1},
+    {3, 9, 15, 21, 27, 33, 39, 45, 51, 57, 63, 69, 75, -1, -1, -1, -1, -1, -1, -1},
+    {5, 10, 16, 22, 28, 34, 40, 46, 52, 58, 64, 70, -1, 94, -1, -1, -1, -1, -1, -1},
+    {11, 17, 23, 29, 65, 71, 77, 83, -1, 89, 95, -1, -1, -1, -1, -1, -1, -1, -1, -1},
 };
 static const int Q = 7, KH = 28, KX = 310, KY = 34;
-static COLORREF g_kc[6][16];   // preview color of every key
+static COLORREF g_kc[6][20];   // preview color of every key
 static COLORREF g_row[6];      // palette color of every row tab
 static bool g_rowSet[6];       // true once the row tab was painted
 static const COLORREF OFF = RGB(64, 64, 64);  // unpainted key look (dark gray)
@@ -322,6 +322,7 @@ template <class F> static void each(F f) {
         int x = KX;
         for (int c = 0; c < (int)g_rows[r].size(); c++) {
             int w = g_rows[r][c].w * Q;
+            if (!g_rows[r][c].n) { x += w; continue; }
             f(r, c, RECT{x, KY + r * KH, x + w, KY + r * KH + KH});
             x += w;
         }
@@ -385,7 +386,7 @@ static LRESULT CALLBACK wnd(HWND h, UINT m, WPARAM w, LPARAM l) {
         mk(h, L"BUTTON", L"Apply RGB", WS_TABSTOP | BS_PUSHBUTTON, 10, 380, 80, 24, ID_RGB);
         for (auto& e : g_effects) SendMessageW(g_fx, CB_ADDSTRING, 0, (LPARAM)e.name);
         SendMessageW(g_fx, CB_SETCURSEL, 0, 0);
-        std::fill(&g_kc[0][0], &g_kc[0][0] + 96, OFF);
+        std::fill(&g_kc[0][0], &g_kc[0][0] + sizeof g_kc / sizeof(COLORREF), OFF);
         mk(h, L"STATIC", L"Row tab or key: that key only. Right click clears. Empty board = effect/palette.", 0, KX, 10, 430, 14, 0);
         mk(h, L"BUTTON", L"Pick...", WS_TABSTOP | BS_PUSHBUTTON, 100, 380, 80, 24, ID_PICK);
         {
@@ -559,7 +560,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     wc.lpszClassName = L"Remap95";
     RegisterClassW(&wc);
 
-    RECT r{0, 0, 750, 414};
+    RECT r{0, 0, 860, 414};
     DWORD st = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     AdjustWindowRect(&r, st, FALSE);
     HWND h = CreateWindowW(L"Remap95", L"Key Remapper", st, CW_USEDEFAULT, CW_USEDEFAULT,

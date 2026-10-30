@@ -1,0 +1,17 @@
+# Build output
+*.exe
+*.o
+*.obj
+*.res
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+x64/
+Debug/
+Release/
